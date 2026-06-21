@@ -1,43 +1,102 @@
-library(MASS)
-library(glmnet)
-library(parallel)
 library(ggplot2)
-library(ggsci)
-library(patchwork)
-source("methods/simulation_methods.R")
+library(glmnet)
+library(MASS)
+library(parallel)
+library(randomForest)
 
-#The script for conducting one experiment is only provided here
-#100 repeated experiments were conducted in the article
+# Example 5: nonlinear feature-selection simulation. Run this script with a
+# seed and a feature-selection method, e.g. Rscript example5.R 1 RF.
 
-###Example logistic
-n <- 200
-p <- 100
-real_p <- 20
+args <- commandArgs(trailingOnly = TRUE)
+seed <- ifelse(length(args) >= 1, as.integer(args[1]), 1)
+method <- ifelse(length(args) >= 2, args[2], "RF")
 
-set.seed(123)
-
-gene_data <- function(n, p, real_p) {
-  X <- mvrnorm(n, mu = rep(0, p), Sigma = diag(p))  # 生成特征矩阵
-  true_coef <- rnorm(p)  # 生成真实系数
-  zero_index <- sample(1:p, p - real_p)
-  true_coef[zero_index] <- 0
-  prob <- 1 / (1 + exp(-X %*% true_coef - rnorm(n, 0, 4)))  # 计算概率
-  Y <- rbinom(n, size = 1, prob = prob)
-  X_test <- mvrnorm(round(0.2 * n), mu = rep(0, p), Sigma = diag(p))
-  prob_test <- 1 / (1 + exp(-X_test %*% true_coef))
-  Y_test <- rbinom(round(0.2 * n), size = 1, prob = prob_test)
-  return(list(X = X, Y = Y, X_test = X_test, Y_test = Y_test, true_coef = true_coef))
+true_model <- function(X) {
+    # Only the first two variables determine the label; all others are noise.
+    x1 <- X[, 1]
+    x2 <- X[, 2]
+    Y <- as.numeric((x1^2 + x2^2) < 8 / pi)
+    return(Y)
 }
 
-lasso_fs <- function(Y, X) {
-  fit <- cv.glmnet(X, Y, family = "binomial")
-  beta_hat <- fit$glmnet.fit$beta[, fit$index[1]]
-  est_index <- which(beta_hat != 0)
-  return(est_index)
+gene_X <- function(n, p){
+    # Keep the first two features informative and fill the rest with noise.
+    x1 <- runif(n, -2, 2)
+    x2 <- runif(n, -2, 2)
+    X <- mvrnorm(n, mu = rep(0, p), Sigma = 8*diag(p))
+    X[, 1] <- x1
+    X[, 2] <- x2
+    return(X)
 }
 
-pv_lasso <- function(predictors, response, reps = 10, BootNum = 100) {
-    sub_part <- function(seed, id_pre, predictors, response) {
+# Apply one of the feature-selection methods used in the manuscript.
+my_fs_simu <- function(X, Y, method = "RF") {
+  if (method == "RF") {
+    rf_model <- randomForest(X, as.factor(Y), importance=TRUE)
+    top_var <- order(rf_model$importance[, "MeanDecreaseAccuracy"], decreasing = TRUE)[1:10]
+  }else if(method == "Lasso") {
+    fit <- cv.glmnet(X, Y, family = "binomial")
+    beta_hat <- fit$glmnet.fit$beta[, fit$index[1]]
+    top_var <- which(beta_hat != 0)
+  }else if(method == "Wilcoxon") {
+    significant_features <- c()
+    scores <- c()
+    for (i in 1:ncol(X)) {
+      group1 <- X[Y == 1, i]
+      group2 <- X[Y == 0, i]
+      test_result <- wilcox.test(group1, group2)
+      if (is.na(test_result$p.value)) {
+          scores <- c(scores, 1)
+          next
+      }else if (test_result$p.value < 0.05) {
+        significant_features <- c(significant_features, i)
+        scores <- c(scores, test_result$p.value)
+      }else {
+        scores <- c(scores, test_result$p.value)
+      }
+    }
+    top_var <- significant_features
+    if(length(significant_features) < 5) {
+        top_var <- order(scores)[1:5]
+    }
+  }else if(method == "KS") {
+    significant_features <- c()
+    for (i in 1:ncol(X)) {
+      test_result <- ks.test(X[, i] ~ Y)
+      if (is.na(test_result$p.value)) {
+          next
+      }else if (test_result$p.value < 0.05) {
+        significant_features <- c(significant_features, i)
+      }
+    }
+    top_var <- significant_features
+  }else if(method == "T_test") {
+    significant_features <- c()
+    scores <- c()
+    for (i in 1:ncol(X)) {
+      test_result <- t.test(X[, i] ~ Y)
+      if (is.na(test_result$p.value)) {
+          scores <- c(scores, 1)
+          next
+      }else if (test_result$p.value < 0.05) {
+        significant_features <- c(significant_features, i)
+        scores <- c(scores, test_result$p.value)
+      }else {
+        scores <- c(scores, test_result$p.value)
+      }
+    }
+    top_var <- significant_features
+    if(length(significant_features) < 5) {
+        top_var <- order(scores)[1:5]
+    }
+    top_var <- significant_features
+  }
+  return(top_var)
+}
+
+# Feature-validity p-value based on overlap stability across random splits.
+pv_simu <- function(predictors, response, method, reps = 10, BootNum = 100) {
+    sub_part <- function(seed, id_pre, predictors, response, method) {
         if(seed > 0) {
             set.seed(seed)
             m <- sum(response == 1)
@@ -47,8 +106,8 @@ pv_lasso <- function(predictors, response, reps = 10, BootNum = 100) {
         }else {
             response2 <- response
         }
-        f1 <- lasso_fs(response2[id_pre], predictors[id_pre, ])
-        f2 <- lasso_fs(response2[-id_pre], predictors[-id_pre, ])
+        f1 <- my_fs_simu(predictors[id_pre, ], response2[id_pre], method)
+        f2 <- my_fs_simu(predictors[-id_pre, ], response2[-id_pre], method)
         return(length(intersect(f1, f2)))
     }
     p_vals <- rep(0, reps)
@@ -56,110 +115,64 @@ pv_lasso <- function(predictors, response, reps = 10, BootNum = 100) {
         set.seed(i+1000)
         id_pre <- sample(seq(1, length(response)), round(length(response) / 2))
         fs <- mclapply(seq(1, BootNum), FUN = sub_part, id_pre, predictors,
-                response, mc.cores = 10)
+                response, method, mc.cores = 10)
         fs <- do.call(rbind, fs)
-        f0 <- sub_part(0, id_pre, predictors, response)
+        f0 <- sub_part(0, id_pre, predictors, response, method)
         p_vals[i] <- (sum(fs > f0) + 1) / (BootNum + 1)
     }
     return(p_vals)
 }
 
-
-my_regression <- function(data, boot_num = 200) {
-  X <- data$X
-  Y <- data$Y
-  my_data <- data.frame(cbind(X, Y))
-  fit <- glm(Y~., data = my_data, family = "binomial")
-  predicted_Y <- fit$fitted.values > 0.5
-  acc0 <- sum(predicted_Y == Y) / length(Y)
-  test_data <- data.frame(data$X_test)
-  colnames(test_data) <- colnames(my_data)[1:dim(data$X_test)[2]]
-  predicted_Y_test <- predict(fit, newdata = test_data, type = "response") > 0.5
-  acc_test <- sum(predicted_Y_test == data$Y_test) / length(data$Y_test)
-  boot_glm <- function(boot) {
-    set.seed(boot + 100)
-    Y2 <- Y[sample(1:length(Y), length(Y))]
-    data <- data.frame(cbind(X, Y2))
-    fit <- glm(Y2 ~ ., data = data, family = "binomial")
-    predicted_Y <- predict(fit, type = "response") > 0.5
-    acc <- sum(predicted_Y == Y2) / length(Y2)
+# Feature-redundancy p-value for a Random Forest trained on selected features.
+rf_rp_compute <- function(X, Y, boot_num = 100) {
+  sub_rf <- function(seed, X, Y) {
+    if(seed > 0) {
+      set.seed(seed)
+      Y2 <- Y[sample(seq(1, n), n)]
+    }else {
+      Y2 <- Y
+    }
+    rf_model <- randomForest(X, as.factor(Y2), maxnodes = 5)
+    acc <- sum(Y2 == predict(rf_model, X)) / length(Y2)
     return(acc)
   }
-  accs <- mclapply(seq(1, boot_num), boot_glm, mc.cores = 10)
+  accs <- mclapply(seq(1, boot_num), sub_rf, X, Y, mc.cores = 10)
   accs <- unlist(accs)
-  P_glm <- (sum(acc0 <= accs) + 1) / (boot_num + 1)
-  glm_res <- list(acc = acc0, acc_test = acc_test, Pr = P_glm)
-
-  fit <- cv.glmnet(X, Y, family = "binomial")
-  beta_hat <- fit$glmnet.fit$beta[, fit$index[1]]
-  true_coef <- data$true_coef
-  true_index <- which(true_coef != 0)
-  est_index <- which(beta_hat != 0)
-  pv <- mean(pv_lasso(X, Y))
-  predicted_P <- 1 / (1 + exp(- X %*% beta_hat - fit$glmnet.fit$a0[fit$index[1]]))
-  predicted_Y <- as.numeric(predicted_P >= 0.5)
-  acc0 <- sum(predicted_Y == Y) / length(Y)
-  predicted_Y_test <- (1 / (1 + exp(- data$X_test %*% beta_hat - fit$glmnet.fit$a0[fit$index[1]]))) > 0.5
-  acc_test <- sum(predicted_Y_test == data$Y_test) / length(data$Y_test)
-  boot_glmnet <- function(boot) {
-    set.seed(boot + 100)
-    Y2 <- Y[sample(1:length(Y), length(Y))]
-    fit <- cv.glmnet(X, Y2, family = "binomial")
-    beta_hat <- fit$glmnet.fit$beta[, fit$index[1]]
-    predicted_P <- 1 / (1 + exp(- X %*% beta_hat - fit$glmnet.fit$a0[fit$index[1]]))
-    predicted_Y <- as.numeric(predicted_P >= 0.5)
-    acc <- sum(predicted_Y == Y2) / length(Y2)
-    return(acc)
-  }
-  accs <- mclapply(seq(1, boot_num), boot_glmnet, mc.cores = 10)
-  accs <- unlist(accs)
-  P_glmnet <- (sum(acc0 <= accs) + 1) / (boot_num + 1)
-  glmnet_res <- list(acc = acc0, acc_test = acc_test, Pr = P_glmnet,
-    true_index = true_index, est_index = est_index, Pv = pv)
-  return(list(glm_res = glm_res, glmnet_res = glmnet_res))
+  acc0 <- sub_rf(0, X, Y)
+  Pr <- (sum(acc0 <= accs) + 1) / (boot_num + 1)
+  return(Pr)
 }
 
+n <- 200
+p_list <- seq(100, 500, 100)
 
-set.seed(100)
-data <- gene_data(100, 50, real_p)
+res <- matrix(0, length(p_list), 4)
+i <- 1
+for (p in p_list) {
+    set.seed(seed)
+    X <- gene_X(n, p)
+    Y <- true_model(X)
 
-df_glm <- data.frame(value = numeric(), p = numeric(), type = character())
-df_glmnet <- data.frame(value = numeric(), p = numeric(), type = character())
+    X_test <- gene_X(round(0.2*n), p)
+    Y_test <- true_model(X_test)
 
-for (p in seq(40, 120, 10)) {
-    data <- gene_data(n, p, real_p)
-    res <- my_regression(data)
-    glm_res <- res$glm_res
-    glmnet_res <- res$glmnet_res
-    df_glm <- rbind(df_glm, data.frame(value = glm_res$acc, p = p, type = "Train Accuracy"))
-    df_glm <- rbind(df_glm, data.frame(value = glm_res$acc_test, p = p, type = "Test Accuracy"))
-    df_glm <- rbind(df_glm, data.frame(value = glm_res$Pr, p = p, type = "Pr"))
-    df_glmnet <- rbind(df_glmnet, data.frame(value = glmnet_res$acc, p = p, type = "Train Accuracy"))
-    df_glmnet <- rbind(df_glmnet, data.frame(value = glmnet_res$acc_test, p = p, type = "Test Accuracy"))
-    df_glmnet <- rbind(df_glmnet, data.frame(value = glmnet_res$Pr, p = p, type = "Pr"))
+    if (method == "All") {
+        rf_model <- randomForest(X, as.factor(Y), importance=TRUE, maxnodes = 5)
+        acc_train <- sum(Y == predict(rf_model, X)) / length(Y)
+        acc_test <- sum(Y_test == predict(rf_model, X_test)) / length(Y_test)
+        Pr <- rf_rp_compute(X, Y)
+        res[i, ] <- c(acc_train, acc_test, Pr, 0)
+    }else {
+        top_var <- my_fs_simu(X, Y, method)
+        X2 <- X[, top_var]
+        rf_model <- randomForest(X2, as.factor(Y), importance=TRUE, maxnodes = 5)
+        acc_train <- sum(Y == predict(rf_model, X[, top_var])) / length(Y)
+        acc_test <- sum(Y_test == predict(rf_model, X_test[, top_var])) / length(Y_test)
+        Pr <- rf_rp_compute(X2, Y)
+        Pv <- mean(pv_simu(X, Y, method))
+        res[i, ] <- c(acc_train, acc_test, Pr, Pv)
+    }
+    i <- i + 1
 }
-
-p_list <- seq(30, 120, 10)
-
-p1 <- ggplot(df_glm, aes(x = p-20, y = value, color = type)) +
-    geom_point() +
-    geom_line() +
-    geom_hline(yintercept = 0.05, linetype = "dashed", color = "black") +
-    scale_x_continuous(breaks = p_list) +
-    scale_y_continuous(breaks = seq(0, 1.0, 0.2), limits = c(0, 1)) +
-    labs(x = "Noise Variables", y = "", color = "") +
-    theme_classic() +
-    theme(legend.position = "none")
-
-p2 <- ggplot(df_glmnet, aes(x = p-20, y = value, color = type)) +
-    geom_point() +
-    geom_line() +
-    geom_hline(yintercept = 0.05, linetype = "dashed", color = "black") +
-    scale_x_continuous(breaks = p_list) +
-    scale_y_continuous(breaks = seq(0, 1.0, 0.2),  limits = c(0, 1)) +
-    labs(x = "Noise Variables", y = "", color = "") +
-    theme_classic()
-
-pdf("fig/example5.pdf", width = 5.7, height = 2)
-p1 + p2
-dev.off()
+rownames(res) <- as.character(p_list)
+colnames(res) <- c("acc_train", "acc_test", "Pr", "Pv")

@@ -1,6 +1,9 @@
 require(Rcpp)
 sourceCpp('methods/MAC.cpp')
 
+# Compute the Maximum Adjusted Chi-squared (MAC) statistic between two
+# paired samples, (X, Y) and (X2, Y2). The optional k argument subsamples
+# anchor points to reduce the cost for larger datasets.
 MAC <- function(X, Y, X2, Y2, k = NULL) {
     if(is.vector(X)) {
         X <- as.matrix(X, ncol = 1)
@@ -27,6 +30,7 @@ MAC <- function(X, Y, X2, Y2, k = NULL) {
     return(mac)
 }
 
+# Symmetric wrapper for two-dimensional point clouds.
 MAC2 <- function(x, y) {
     mac1 <- MAC(x[, 1], x[, 2], y[, 1], y[, 2])
     mac2 <- MAC(y[, 1], y[, 2], x[, 1], x[, 2])

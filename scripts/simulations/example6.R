@@ -1,174 +1,132 @@
-library(ggplot2)
-library(glmnet)
-library(MASS)
-library(parallel)
+library(mixOmics)
 library(randomForest)
+library(e1071)
+library(Rtsne)
+library(caret)
+library(mBoost)
+library(glmnet)
+library(xgboost)
+library(keras3)
+library(pROC)
+library(parallel)
 
-#Here is the code for a repeated experiment under a feature selection method
-
-seed <- commandArgs(trailingOnly = TRUE)[1]
-method <- commandArgs(trailingOnly = TRUE)[2]
-
-true_model <- function(X) {
-    #n <- dim(X)[1]
-    x1 <- X[, 1]
-    x2 <- X[, 2]
-    Y <- as.numeric((x1^2 + x2^2) < 8 / pi)
-    return(Y)
+# Example 6: negative-control simulation with random labels. It checks
+# whether the diagnostics avoid reporting spurious model improvement.
+get_auc <- function(true_labels, pred_probs) {
+  roc_obj <- roc(true_labels, pred_probs, quiet = TRUE)
+  return(as.numeric(auc(roc_obj)))
 }
 
-gene_X <- function(n, p){
-    x1 <- runif(n, -2, 2)
-    x2 <- runif(n, -2, 2)
-    X <- mvrnorm(n, mu = rep(0, p), Sigma = 8*diag(p))
-    X[, 1] <- x1
-    X[, 2] <- x2
-    return(X)
-}
-
-my_fs_simu <- function(X, Y, method = "RF") {
-  if (method == "RF") {
-    rf_model <- randomForest(X, as.factor(Y), importance=TRUE)
-    top_var <- order(rf_model$importance[, "MeanDecreaseAccuracy"], decreasing = TRUE)[1:10]
-  }else if(method == "Lasso") {
-    fit <- cv.glmnet(X, Y, family = "binomial")
-    beta_hat <- fit$glmnet.fit$beta[, fit$index[1]]
-    top_var <- which(beta_hat != 0)
-  }else if(method == "Wilcoxon") {
-    significant_features <- c()
-    scores <- c()
-    for (i in 1:ncol(X)) {
-      group1 <- X[Y == 1, i]
-      group2 <- X[Y == 0, i]
-      test_result <- wilcox.test(group1, group2)
-      if (is.na(test_result$p.value)) {
-          scores <- c(scores, 1)
-          next
-      }else if (test_result$p.value < 0.05) {
-        significant_features <- c(significant_features, i)
-        scores <- c(scores, test_result$p.value)
-      }else {
-        scores <- c(scores, test_result$p.value)
-      }
+# Train one model type, compute train/test AUC, and estimate RP/IP statistics
+# under label perturbation.
+overfit_model_type <- function(X_train, Y_train, X_test, Y_test, model_type, boot_num = 100) {
+  pos_class <- levels(Y_train)[2]
+  if(model_type == "knn") {
+    model_knn <- knn3(X_train, Y_train, k = 5)
+    prob_train <- predict(model_knn, X_train, type = "prob")[, pos_class]
+    prob_test <- predict(model_knn, X_test, type = "prob")[, pos_class]
+    model_train <- function(X_train, Y_train) {
+        model_knn <- knn3(X_train, Y_train, k = 5)
+        prob_train <- predict(model_knn, X_train, type = "prob")[, pos_class]
+        auc0 <- get_auc(Y_train, prob_train)
+        return(auc0)
     }
-    top_var <- significant_features
-    if(length(significant_features) < 5) {
-        top_var <- order(scores)[1:5]
+  }else if(model_type == "svm") {
+    model_svm <- svm(X_train, Y_train, probability = TRUE, kernel = "radial")
+    pred_train_svm <- predict(model_svm, X_train, probability = TRUE)
+    prob_train <- attr(pred_train_svm, "probabilities")[, pos_class]
+    pred_test_svm <- predict(model_svm, X_test, probability = TRUE)
+    prob_test <- attr(pred_test_svm, "probabilities")[, pos_class]
+    model_train <- function(X_train, Y_train) {
+        model_svm <- svm(X_train, Y_train, probability = TRUE, kernel = "radial")
+        pred_train_svm <- predict(model_svm, X_train, probability = TRUE)
+        prob_train <- attr(pred_train_svm, "probabilities")[, pos_class]
+        auc0 <- get_auc(Y_train, prob_train)
+        return(auc0)
     }
-  }else if(method == "KS") {
-    significant_features <- c()
-    for (i in 1:ncol(X)) {
-      test_result <- ks.test(X[, i] ~ Y)
-      if (is.na(test_result$p.value)) {
-          next
-      }else if (test_result$p.value < 0.05) {
-        significant_features <- c(significant_features, i)
-      }
+  }else if (model_type == "rf") {
+    model_rf <- randomForest(x = X_train, y = Y_train, ntree = 500)
+    prob_train <- predict(model_rf, X_train, type = "prob")[, pos_class]
+    prob_test <- predict(model_rf, X_test, type = "prob")[, pos_class]
+    model_train <- function(X_train, Y_train) {
+        model_rf <- randomForest(x = X_train, y = Y_train, ntree = 500)
+        prob_train <- predict(model_rf, X_train, type = "prob")[, pos_class]
+        auc0 <- get_auc(Y_train, prob_train)
+        return(auc0)
     }
-    top_var <- significant_features
-  }else if(method == "T_test") {
-    significant_features <- c()
-    scores <- c()
-    for (i in 1:ncol(X)) {
-      test_result <- t.test(X[, i] ~ Y)
-      if (is.na(test_result$p.value)) {
-          scores <- c(scores, 1)
-          next
-      }else if (test_result$p.value < 0.05) {
-        significant_features <- c(significant_features, i)
-        scores <- c(scores, test_result$p.value)
-      }else {
-        scores <- c(scores, test_result$p.value)
-      }
+  }else if(model_type == "xgb") {
+    Y_train_num <- ifelse(Y_train == pos_class, 1, 0)
+    Y_test_num <- ifelse(Y_test == pos_class, 1, 0)
+    dtrain <- xgb.DMatrix(data = X_train, label = Y_train_num)
+    dtest <- xgb.DMatrix(data = X_test, label = Y_test_num)
+    params <- list(objective = "binary:logistic", eval_metric = "auc", max_depth = 2, eta = 0.01)
+    model_xgb <- xgb.train(params = params, data = dtrain, nrounds = 50)
+    prob_train <- predict(model_xgb, dtrain)
+    prob_test <- predict(model_xgb, dtest)
+    model_train <- function(X_train, Y_train) {
+        Y_train_num <- ifelse(Y_train == pos_class, 1, 0)
+        dtrain <- xgb.DMatrix(data = X_train, label = Y_train_num)
+        model_xgb <- xgb.train(params = params, data = dtrain, nrounds = 100)
+        prob_train <- predict(model_xgb, dtrain)
+        auc0 <- get_auc(Y_train, prob_train)
+        return(auc0)
     }
-    top_var <- significant_features
-    if(length(significant_features) < 5) {
-        top_var <- order(scores)[1:5]
+  }else if (model_type == "lasso") {
+    Y_train_num <- ifelse(Y_train == pos_class, 1, 0)
+    Y_test_num <- ifelse(Y_test == pos_class, 1, 0)
+    cv_lasso <- cv.glmnet(X_train, Y_train_num, family = "binomial", alpha = 1)
+    best_lambda <- cv_lasso$lambda.min
+    prob_train <- predict(cv_lasso, newx = X_train, s = best_lambda, type = "response")[, 1]
+    prob_test <- predict(cv_lasso, newx = X_test, s = best_lambda, type = "response")[, 1]
+    model_train <- function(X_train, Y_train) {
+        Y_train_num <- ifelse(Y_train == pos_class, 1, 0)
+        cv_lasso <- cv.glmnet(X_train, Y_train_num, family = "binomial", alpha = 1)
+        best_lambda <- cv_lasso$lambda.min
+        prob_train <- predict(cv_lasso, newx = X_train, s = best_lambda, type = "response")[, 1]
+        auc0 <- get_auc(Y_train, prob_train)
+        return(auc0)
     }
-    top_var <- significant_features
   }
-  return(top_var)
-}
-
-pv_simu <- function(predictors, response, method, reps = 10, BootNum = 100) {
-    sub_part <- function(seed, id_pre, predictors, response, method) {
-        if(seed > 0) {
-            set.seed(seed)
-            m <- sum(response == 1)
-            id <- sample(seq(1, length(response)), m)
-            response2 <- rep(0, length(response))
-            response2[id] <- 1
-        }else {
-            response2 <- response
-        }
-        f1 <- my_fs_simu(predictors[id_pre, ], response2[id_pre], method)
-        f2 <- my_fs_simu(predictors[-id_pre, ], response2[-id_pre], method)
-        return(length(intersect(f1, f2)))
-    }
-    p_vals <- rep(0, reps)
-    for (i in 1:reps) {
-        set.seed(i+1000)
-        id_pre <- sample(seq(1, length(response)), round(length(response) / 2))
-        fs <- mclapply(seq(1, BootNum), FUN = sub_part, id_pre, predictors,
-                response, method, mc.cores = 10)
-        fs <- do.call(rbind, fs)
-        f0 <- sub_part(0, id_pre, predictors, response, method)
-        p_vals[i] <- (sum(fs > f0) + 1) / (BootNum + 1)
-    }
-    return(p_vals)
-}
-
-rf_rp_compute <- function(X, Y, boot_num = 100) {
-  sub_rf <- function(seed, X, Y) {
-    if(seed > 0) {
-      set.seed(seed)
-      Y2 <- Y[sample(seq(1, n), n)]
-    }else {
-      Y2 <- Y
-    }
-    rf_model <- randomForest(X, as.factor(Y2), maxnodes = 5)
-    acc <- sum(Y2 == predict(rf_model, X)) / length(Y2)
-    return(acc)
+  auc0 <- get_auc(Y_train, prob_train)
+  auc_test <- get_auc(Y_test, prob_test)
+  Y_train_num <- ifelse(Y_train == pos_class, 1, 0)
+  IP <- ps_probs(X_train, Y_train_num, prob_train, 20, 200)
+  boot_glm <- function(boot) {
+    set.seed(boot + 100)
+    Y2 <- Y_train[sample(1:length(Y_train), length(Y_train))]
+    acc0 <- model_train(X_train, Y2)
+    return(acc0)
   }
-  accs <- mclapply(seq(1, boot_num), sub_rf, X, Y, mc.cores = 10)
+  accs <- mclapply(seq(1, boot_num), boot_glm, mc.cores = 20)
   accs <- unlist(accs)
-  acc0 <- sub_rf(0, X, Y)
-  Pr <- (sum(acc0 <= accs) + 1) / (boot_num + 1)
-  return(Pr)
+  P <- (sum(auc0 <= accs) + 1) / (boot_num + 1)
+  return(list(acc0 = auc0, acc_test = auc_test, P = P, IP = IP))
 }
 
-n <- 200
-p_list <- seq(100, 500, 100)
+args <- commandArgs(trailingOnly = TRUE)
+seed <- ifelse(length(args) >= 1, as.integer(args[1]), 1)
 
-res <- matrix(0, length(p_list), 4)
-i <- 1
-for (p in p_list) {
-    set.seed(seed)
-    X <- gene_X(n, p)
-    Y <- true_model(X)
+n <- 100
+p <- 20
+set.seed(seed)
 
-    X_test <- gene_X(round(0.2*n), p)
-    Y_test <- true_model(X_test)
+X_train <- mvrnorm(n, mu = rep(0, p), Sigma = diag(p))
+X_test <- mvrnorm(round(0.2*n), mu = rep(0, p), Sigma = diag(p))
 
-    if (method == "All") {
-        rf_model <- randomForest(X, as.factor(Y), importance=TRUE, maxnodes = 5)
-        acc_train <- sum(Y == predict(rf_model, X)) / length(Y)
-        acc_test <- sum(Y_test == predict(rf_model, X_test)) / length(Y_test)
-        Pr <- rf_rp_compute(X, Y)
-        res[i, ] <- c(acc_train, acc_test, Pr, 0)
-    }else {
-        top_var <- my_fs_simu(X, Y, method)
-        X2 <- X[, top_var]
-        rf_model <- randomForest(X2, as.factor(Y), importance=TRUE, maxnodes = 5)
-        acc_train <- sum(Y == predict(rf_model, X[, top_var])) / length(Y)
-        acc_test <- sum(Y_test == predict(rf_model, X_test[, top_var])) / length(Y_test)
-        Pr <- rf_rp_compute(X2, Y)
-        Pv <- mean(pv_simu(X, Y, method))
-        res[i, ] <- c(acc_train, acc_test, Pr, Pf)
-    }
-    i <- i + 1
+Y <- sample(c(0, 1), nrow(X_train), replace = TRUE)
+Y_train <- as.factor(Y)
+
+Y <- sample(c(0, 1), nrow(X_test), replace = TRUE)
+Y_test <- as.factor(Y)
+
+models <- c("knn", "rf", "lasso", "xgb", "svm")
+results <- matrix(0, 4, length(models))
+colnames(results) <- models
+rownames(results) <- c("Train_AUC", "Test_AUC", "RP", "IP")
+for(i in 1:length(models)) {
+    model_type <- models[i]
+    tmp <- overfit_model_type(X_train, Y_train, X_test, Y_test, model_type)
+    results[, i] <- as.vector(unlist(tmp))
 }
-rownames(res) <- as.character(p_list)
-colnames(res) <- c("acc_train", "acc_test", "Pr", "Pv")
 
-saveRDS(res, paste0("data/simu_rp_rf_", method, "seed_", seed, ".rds"))
+saveRDS(results, paste0("simulation/simu_RP/id_", seed, ".rds"))

@@ -3,6 +3,8 @@ require(parallel)
 require(SIAMCAT)
 require(dplyr)
 
+# Structure-improvement p-value for SIAMCAT models, using model-predicted
+# probabilities to generate bootstrap labels.
 ps_based_siamcat <- function(X, siamcat.train, BootNumber = 1000) {
   predicted_probs <- eval_data(siamcat.train)$roc$predictor
   Y <- eval_data(siamcat.train)$roc$response
@@ -25,6 +27,7 @@ ps_based_siamcat <- function(X, siamcat.train, BootNumber = 1000) {
   return(P)
 }
 
+# Train one SIAMCAT model per cohort and summarize AUC with the ps diagnostic.
 my_siamcat_with_ps <- function(feat_list, meta_list, method = "lasso", boot_num = 200) {
   project.list <- names(feat_list)
   oto_res <- list()

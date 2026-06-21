@@ -6,6 +6,8 @@ library(parallel)
 library(kSamples)
 
 
+# Feature selection wrappers used for the feature-validity diagnostic (pv).
+# The file name keeps the original project spelling: "validaty".
 my_fs <- function(response, predictors, method = "Wilcoxon", fs_num = 20) {
     significant_features <- c()
     ranked_feacture <- c()
@@ -96,6 +98,8 @@ my_fs <- function(response, predictors, method = "Wilcoxon", fs_num = 20) {
     return(c(ranked_feacture))
 }
 
+# Test whether selected features are stable across random data splits beyond
+# what would be expected after phenotype permutation.
 feature_validaty <- function(predictors, response, method, reps = 10, BootNum = 100) {
     sub_part <- function(seed, id_pre, predictors, response, method) {
         if(seed > 0) {
@@ -125,6 +129,7 @@ feature_validaty <- function(predictors, response, method, reps = 10, BootNum = 
     return(p_vals)
 }
 
+# Apply the pv diagnostic to each cohort in the selected disease/data type.
 pv_one_cohort <- function(feat_list, meta_list, method, reps = 10, BootNum = 100) {
   res <- NULL
   for (project in names(feat_list)) {

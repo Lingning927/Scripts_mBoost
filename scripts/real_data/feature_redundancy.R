@@ -2,6 +2,8 @@ require(SIAMCAT)
 require(parallel)
 require(dplyr)
 
+# Train a SIAMCAT classifier and return its internal cross-validation AUC.
+# When boot_seed > 0, labels are permuted to form the null distribution for pr.
 compute_auc <- function(feat, meta, boot_seed = 0, method = "lasso") {
   if (boot_seed > 0) {
     set.seed(100 + boot_seed)
@@ -42,6 +44,7 @@ compute_auc <- function(feat, meta, boot_seed = 0, method = "lasso") {
   return(auc)
 }
 
+# Feature-redundancy p-value from the observed AUC versus permuted-label AUCs.
 compute_aucs <- function(feat, meta, boot_num = 200) {
   auc0 <- compute_auc(feat, meta)
   aucs <- mclapply(1:boot_num, FUN = compute_auc, feat = feat,
@@ -51,6 +54,8 @@ compute_aucs <- function(feat, meta, boot_num = 200) {
   return(list(auc0 = auc0, aucs = aucs, P = P))
 }
 
+# For each cohort, compute pr and cross-cohort AUCs against other cohorts of
+# the same disease/data type.
 Pr_one_cohort <- function(feat_list, meta_list, method = "lasso", boot_num = 200) {
   project.list <- names(feat_list)
   oto_res <- list()

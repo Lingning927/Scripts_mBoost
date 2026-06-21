@@ -1,8 +1,10 @@
-#The function for compute p-value of structure improvement under different cases
+# Helper functions for computing the structure-improvement p-value (ps)
+# under continuous outcomes, GLMs, glmnet fits, or supplied probabilities.
 source("methods/NewMac.R")
 require(parallel)
 
-#Version for continuous Y
+# Continuous response: bootstrap residuals from the working model and
+# compare observed data against model-generated data with MAC.
 BootStrapTb <- function(Predictor, TrueValue, Estimator, BootNumber) {
     eta <- TrueValue - Estimator
     if(is.vector(eta)) {
@@ -40,7 +42,7 @@ ps_continuous <- function(X, Y, Y2, BootNumber = 1000) {
 }
 
 
-#Version for glm
+# Binary GLM: parametric bootstrap from fitted probabilities.
 ps_glm <- function(X, Y, model, BootNumber = 1000) {
   predicted_probs <- predict(model, type = "response")
   boot_tb <- function(boot, X, Y, predicted_probs) {
@@ -62,7 +64,7 @@ ps_glm <- function(X, Y, model, BootNumber = 1000) {
 }
 
 
-#Version for glmnet
+# glmnet logistic model: extract the selected lambda and bootstrap labels.
 compute_P_glmnet <- function(X, Y, fit, BootNumber = 1000) {
   beta_hat <- fit$glmnet.fit$beta[, fit$index[1]]
   predicted_probs <- 1 / (1 + exp(- X %*% beta_hat - fit$glmnet.fit$a0[fit$index[1]]))
@@ -84,7 +86,8 @@ compute_P_glmnet <- function(X, Y, fit, BootNumber = 1000) {
   return(P)
 }
 
-#Version with predicted probility
+# Generic binary model interface when predicted probabilities are already
+# available from an external model.
 ps_with_probs <- function(X, Y, predicted_probs, BootNumber = 1000) {
   boot_tb <- function(boot, X, Y, predicted_probs) {
     set.seed(boot + 100)

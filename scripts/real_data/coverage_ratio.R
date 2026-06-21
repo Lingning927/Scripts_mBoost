@@ -1,6 +1,8 @@
 library(Rtsne)
 library(parallel)
 
+# Coverage Ratio (CR): proportion of test-set samples that are locally
+# covered by training-set samples in a shared t-SNE embedding.
 coverage_ratio <- function(x, y) {
   dist_x <- as.matrix(stats::dist(x))
   diag(dist_x) <- rep(100000, dim(x)[1])
@@ -12,6 +14,7 @@ coverage_ratio <- function(x, y) {
   return(sum(nearest_dist_xy < nearest_dist_x) / length(nearest_dist_xy))
 }
 
+# Compute pairwise CR values for all cohort pairs in one disease/data-type set.
 CR_one_cohort <- function(feat_list, meta_list) {
   project.list <- names(feat_list)
   res <- list()
